@@ -8,7 +8,9 @@ app.use(cors());
 
 const ORIGIN = "https://a.windbornesystems.com/treasure";
 
-/** 调试：只测一小时是否可达，以及返回体前几百字符 */
+/**
+ * Simple connectivity test: request hour-00 raw JSON
+ */
 app.get("/api/ping", async (_req, res) => {
     const url = `${ORIGIN}/00.json`;
     try {
@@ -25,14 +27,18 @@ app.get("/api/ping", async (_req, res) => {
     }
 });
 
-/** 调试：透传某小时原始 JSON，便于观察真实结构 */
+/**
+ * Fetch raw hourly data (00–23)
+ * We DO NOT JSON.parse because the source sometimes contains malformed JSON.
+ * We return raw text directly.
+ */
 app.get("/api/raw", async (req, res) => {
     const h = String(req.query.h || "00").padStart(2, "0");
     const url = `${ORIGIN}/${h}.json`;
     try {
         const r = await fetch(url, { headers: { accept: "application/json,*/*" } });
         const txt = await r.text();
-        // 可能不是严格 JSON，尽量别直接 JSON.parse，这里原样透传
+        // Might not be strict JSON; return as-is.
         res.setHeader("Content-Type", "application/json; charset=utf-8");
         res.send(txt);
     } catch (e) {
@@ -40,7 +46,10 @@ app.get("/api/raw", async (req, res) => {
     }
 });
 
-/** 工具：深度遍历对象的所有子节点 */
+/**
+ * Depth-first traversal through ANY nested object structure.
+ * This is used to aggressively extract coordinates from messy / unknown schemas.
+ */
 function* walkAll(obj) {
     const stack = [obj];
     const seen = new Set();
@@ -58,78 +67,121 @@ function* walkAll(obj) {
     }
 }
 
-/** 工具：尝试从任意节点提取 {id, lat, lon, ts, alt} */
+/**
+ * Attempt to extract a balloon point (lon/lat/id/ts/alt) from an arbitrary object node.
+ * This tries many possible field names, including nested structures.
+ */
 function tryExtract(node) {
     if (!node || typeof node !== "object") return null;
 
-    // 多种可能的 id
-    const id = node.id || node.balloon_id || node.name || node.serial || node.uuid || node._id;
+    // Possible ID fields
+    const id =
+        node.id ||
+        node.balloon_id ||
+        node.name ||
+        node.serial ||
+        node.uuid ||
+        node._id;
 
-    // 直接字段
+    // Direct fields
     let lat = node.lat ?? node.latitude;
     let lon = node.lon ?? node.lng ?? node.longitude;
-    let ts  = node.ts ?? node.timestamp ?? node.time ?? node.t ?? null;
+    let ts = node.ts ?? node.timestamp ?? node.time ?? node.t ?? null;
     let alt = node.alt ?? node.altitude ?? null;
 
-    // 嵌套字段：position / coords / geojson
-    if ((!Number.isFinite(lat) || !Number.isFinite(lon))) {
-        if (node.position && typeof node.position === "object") {
+    // Nested fields: position / coords / geojson
+    if ((!Number.isFinite(lat) || !Number.isFinite(lon)) && node.position) {
+        if (typeof node.position === "object") {
             lat = node.position.lat ?? node.position.latitude ?? lat;
             lon = node.position.lon ?? node.position.lng ?? node.position.longitude ?? lon;
             alt = node.position.alt ?? node.position.altitude ?? alt;
-            ts  = node.position.ts  ?? node.position.time ?? ts;
+            ts = node.position.ts ?? node.position.time ?? ts;
         }
     }
-    if ((!Number.isFinite(lat) || !Number.isFinite(lon)) && Array.isArray(node.coords) && node.coords.length >= 2) {
-        // 假设 coords: [lon, lat] 或 [lat, lon]，优先按 [lon,lat]
-        const [a,b] = node.coords;
+
+    // coords array: might be [lon, lat] or [lat, lon]
+    if ((!Number.isFinite(lat) || !Number.isFinite(lon)) &&
+        Array.isArray(node.coords) &&
+        node.coords.length >= 2) {
+        const [a, b] = node.coords;
         if (Number.isFinite(a) && Number.isFinite(b)) {
-            // 选择经度在 [-180,180] 且纬度在 [-90,90] 的组合
+            // Choose the valid lon/lat combo
             const asLonLat = Math.abs(a) <= 180 && Math.abs(b) <= 90;
             lon = asLonLat ? a : b;
             lat = asLonLat ? b : a;
         }
     }
-    if ((!Number.isFinite(lat) || !Number.isFinite(lon)) && node.geometry && Array.isArray(node.geometry.coordinates)) {
+
+    // GeoJSON-style geometry.coordinates
+    if ((!Number.isFinite(lat) || !Number.isFinite(lon)) &&
+        node.geometry &&
+        Array.isArray(node.geometry.coordinates)) {
         const c = node.geometry.coordinates;
         if (c.length >= 2 && Number.isFinite(c[0]) && Number.isFinite(c[1])) {
-            lon = c[0]; lat = c[1];
+            lon = c[0];
+            lat = c[1];
         }
     }
 
     if (Number.isFinite(lat) && Number.isFinite(lon)) {
-        // ts 兜底：没有时间就用 0（稍后再按加入顺序补时间）
-        return { id: id ?? "unknown", lat: +lat, lon: +lon, ts: ts ? +ts : null, alt: alt ? +alt : null };
+        // Fallback: if no timestamp, assign a sequence timestamp later
+        return {
+            id: id ?? "unknown",
+            lat: +lat,
+            lon: +lon,
+            ts: ts ? +ts : null,
+            alt: alt ? +alt : null,
+        };
     }
     return null;
 }
 
-/** 主路由：聚合近 24 小时 → GeoJSON(线) + 最新点(点) */
+/**
+ * Main route:
+ *   - Fetch raw data for the last 24 hours
+ *   - Extract all possible coordinates from messy JSON
+ *   - Group by ID
+ *   - Construct:
+ *       • A FeatureCollection of LineStrings (full 24h track per ID)
+ *       • A FeatureCollection of Points (latest position per ID)
+ */
 app.get("/api/windborne", async (_req, res) => {
     try {
-        const hours = Array.from({ length: 24 }, (_, i) => i.toString().padStart(2, "0"));
+        const hours = Array.from({ length: 24 }, (_, i) =>
+            i.toString().padStart(2, "0")
+        );
 
-        const pages = await Promise.all(hours.map(async (hh, idx) => {
-            await sleep(idx * 20);
-            const url = `${ORIGIN}/${hh}.json`;
-            try {
-                const r = await fetch(url, { headers: { accept: "application/json,*/*" } });
-                if (!r.ok) throw new Error(`${url} -> ${r.status}`);
-                // 不直接 JSON.parse，部分小时可能“看起来像 JSON 但有小瑕疵”
-                const text = await r.text();
+        // Fetch 24 pages (00–23), spaced by 20ms to avoid hammering the source
+        const pages = await Promise.all(
+            hours.map(async (hh, idx) => {
+                await sleep(idx * 20);
+                const url = `${ORIGIN}/${hh}.json`;
                 try {
-                    return JSON.parse(text);
-                } catch {
-                    // 尝试粗修（去除 BOM/末尾逗号等），实在不行就跳过
-                    const fixed = text.replace(/^\uFEFF/, "").replace(/,\s*([}\]])/g, "$1");
-                    try { return JSON.parse(fixed); } catch { return null; }
-                }
-            } catch {
-                return null;
-            }
-        }));
+                    const r = await fetch(url, { headers: { accept: "application/json,*/*" } });
+                    if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+                    const text = await r.text();
 
-        // 深度遍历所有页面，尽可能多地抓点
+                    // Try direct parse
+                    try {
+                        return JSON.parse(text);
+                    } catch {
+                        // Attempt minor cleanup (remove BOM, trailing commas)
+                        const fixed = text
+                            .replace(/^\uFEFF/, "")
+                            .replace(/,\s*([}\]])/g, "$1");
+                        try {
+                            return JSON.parse(fixed);
+                        } catch {
+                            return null;
+                        }
+                    }
+                } catch {
+                    return null;
+                }
+            })
+        );
+
+        // Traverse all pages and extract all candidate points
         const rawPoints = [];
         for (const page of pages) {
             if (!page) continue;
@@ -139,12 +191,13 @@ app.get("/api/windborne", async (_req, res) => {
             }
         }
 
-        // 按 id 分组；没有 ts 的按加入顺序赋一个自增时间
+        // Group by ID, and assign fallback timestamps where missing
         const byId = new Map();
-        let seqTs = Date.now() - 24 * 3600 * 1000; // 给没 ts 的点一个相对时间
+        let seqTs = Date.now() - 24 * 3600 * 1000;
         for (const p of rawPoints) {
             if (p.ts == null || !Number.isFinite(p.ts)) {
-                p.ts = seqTs; seqTs += 1000;
+                p.ts = seqTs;
+                seqTs += 1000;
             }
             if (!byId.has(p.id)) byId.set(p.id, []);
             byId.get(p.id).push(p);
@@ -152,11 +205,12 @@ app.get("/api/windborne", async (_req, res) => {
 
         const lines = [];
         const latest = [];
-        for (const [id, pts] of byId.entries()) {
-            if (pts.length < 2) continue; // 至少两个点才画线
-            pts.sort((a,b) => a.ts - b.ts);
 
-            // 去除明显异常点（经纬超界）
+        for (const [id, pts] of byId.entries()) {
+            if (pts.length < 2) continue; // need ≥2 points to form a line
+            pts.sort((a, b) => a.ts - b.ts);
+
+            // Filter obviously invalid coordinates
             const coords = pts
                 .filter(p => Math.abs(p.lon) <= 180 && Math.abs(p.lat) <= 90)
                 .map(p => [p.lon, p.lat]);
@@ -167,6 +221,7 @@ app.get("/api/windborne", async (_req, res) => {
                     properties: { id, points: coords.length, latest: pts.at(-1).ts },
                     geometry: { type: "LineString", coordinates: coords }
                 });
+
                 const last = pts.at(-1);
                 latest.push({
                     type: "Feature",
@@ -186,7 +241,10 @@ app.get("/api/windborne", async (_req, res) => {
     }
 });
 
-/** 代理 Open-Meteo：取风速/风向 */
+/**
+ * Proxy for Open-Meteo:
+ * Fetch current wind speed + direction at (lat, lon)
+ */
 app.get("/api/wind", async (req, res) => {
     try {
         const { lat, lon } = req.query;
