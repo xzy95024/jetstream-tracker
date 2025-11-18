@@ -1,0 +1,65 @@
+# =========================================
+# Node.js & React Monorepo .gitignore
+# =========================================
+
+# Node modules
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Runtime files
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Environment variables (very important!)
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+.env.*.local
+
+# Vite / Webpack
+.cache/
+.vite/
+.next/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / Editor
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# Typescript
+*.tsbuildinfo
+
+# Optional: lock file backups
+package-lock.json*
+yarn.lock*
+pnpm-lock.yaml*
+
+# Misc
+.sass-cache
+.eslintcache
+.stylelintcache
+
+# JetBrains IDE HTTP requests
+/httpRequests/
+
+# JetBrains data sources
+/dataSources/
