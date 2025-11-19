@@ -1,5 +1,7 @@
 // src/api/fetchHour.ts
 
+import { API_BASE_URL } from "../config/api";
+
 /**
  * Fetch raw balloon data for a given hour from the backend.
  * Goals:
@@ -9,10 +11,9 @@
  *  - If resp.ok === false → silently return []
  *  - Always return number[][]
  */
-
 export async function fetchHour(hour: string): Promise<number[][]> {
     try {
-        const resp = await fetch(`/api/raw?h=${hour}`);
+        const resp = await fetch(`${API_BASE_URL}/api/raw?h=${hour}`);
 
         // Request succeeded but status code is not OK (e.g., 404/500)
         if (!resp.ok) {
