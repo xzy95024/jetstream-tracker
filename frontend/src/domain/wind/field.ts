@@ -55,7 +55,7 @@ export function createWindFieldFromSample(sample: WindSample): WindField {
     });
 
     return {
-        getWind(lon: number, lat: number) {
+        getWind(_lon: number, _lat: number) {
             // Currently: constant wind field; could later implement grid interpolation
             return { u, v };
         },

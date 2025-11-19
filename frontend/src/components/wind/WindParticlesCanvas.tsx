@@ -109,11 +109,16 @@ export default function WindParticlesCanvas({
 
     // 2. Animation loop
     useEffect(() => {
+        // 这里先拿一份当前的 canvas/map 引用
         const canvas = canvasRef.current;
         const map = mapRef.current;
+
+        // ✅ 如果没有 map 或 canvas，直接结束这个 effect
         if (!canvas || !map) return;
 
         const ctx = canvas.getContext("2d");
+
+        // ✅ 没有 2D 上下文也直接结束
         if (!ctx) return;
 
         const mapCanvas = map.getCanvas() as HTMLCanvasElement;
@@ -149,7 +154,13 @@ export default function WindParticlesCanvas({
         map.on("moveend", handleMoveEnd);
 
         function step() {
+            // 请求下一帧
             frameRef.current = requestAnimationFrame(step);
+
+            // ✅ 再次在函数内部做一次 null check，满足 TypeScript
+            if (!canvas || !ctx || !map) {
+                return;
+            }
 
             if (!enabled || !windField) {
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -219,6 +230,7 @@ export default function WindParticlesCanvas({
             }
         }
 
+        // 启动动画循环
         frameRef.current = requestAnimationFrame(step);
 
         return () => {
